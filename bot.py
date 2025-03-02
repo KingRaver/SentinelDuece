@@ -993,8 +993,11 @@ class CryptoAnalysisBot:
 
         return should_post, trigger_reason
 
-    def _analyze_market_sentiment(self, token: str, crypto_data: Dict[str, Any], trigger_type: str) -> Optional[str]:
-        """Generate token-specific market analysis with focus on volume and smart money"""
+    def _analyze_market_sentiment(self, token: str, crypto_data: Dict[str, Any], trigger_type: str) -> Tuple[Optional[str], Optional[Dict]]:
+        """
+        Generate token-specific market analysis with focus on volume and smart money.
+        Returns the formatted tweet and data needed to store it in the database.
+        """
         max_retries = 3
         retry_count = 0
         
@@ -1018,7 +1021,7 @@ class CryptoAnalysisBot:
                 token_data = crypto_data.get(token, {})
                 if not token_data:
                     logger.log_error("Market Analysis", f"Missing {token} data")
-                    return None
+                    return None, None
                 
                 # Calculate correlations with market
                 correlations = self._calculate_correlations(token, crypto_data)
@@ -1204,20 +1207,17 @@ Market Flow Analysis:
                 
                 formatted_tweet = self._format_tweet_analysis(token, analysis, crypto_data)
                 
-                # Use the improved duplicate detection 
-                skip_similarity_check = False
+                # Create the storage data to be stored later (after duplicate check)
+                storage_data = {
+                    'content': formatted_tweet,
+                    'sentiment': {token: token_mood},
+                    'trigger_type': trigger_type,
+                    'price_data': {token: {'price': token_data['current_price'], 
+                                         'volume': token_data['volume']}},
+                    'meme_phrases': {token: meme_context}
+                }
                 
-                # Store the content (always store for data collection)
-                self.config.db.store_posted_content(
-                    content=formatted_tweet,
-                    sentiment={token: token_mood},
-                    trigger_type=trigger_type,
-                    price_data={token: {'price': token_data['current_price'], 
-                                      'volume': token_data['volume']}},
-                    meme_phrases={token: meme_context}
-                )
-                
-                return formatted_tweet
+                return formatted_tweet, storage_data
                 
             except Exception as e:
                 retry_count += 1
@@ -1228,7 +1228,7 @@ Market Flow Analysis:
                 continue
         
         logger.log_error("Market Analysis", "Maximum retries reached")
-        return None
+        return None, None
 
     def _run_analysis_cycle(self) -> None:
         """Run analysis and posting cycle for all tokens"""
@@ -1254,14 +1254,20 @@ Market Flow Analysis:
                 
                 if should_post:
                     logger.logger.info(f"Starting {token_to_analyze} analysis cycle - Trigger: {trigger_type}")
-                    analysis = self._analyze_market_sentiment(token_to_analyze, market_data, trigger_type)
-                    if not analysis:
+                    
+                    # Get analysis and storage data without storing in DB yet
+                    analysis, storage_data = self._analyze_market_sentiment(token_to_analyze, market_data, trigger_type)
+                    
+                    if not analysis or not storage_data:
                         logger.logger.error(f"Failed to generate {token_to_analyze} analysis")
                         continue  # Try next token instead of returning
                         
                     last_posts = self._get_last_posts()
                     if not self._is_duplicate_analysis(analysis, last_posts):
                         if self._post_analysis(analysis):
+                            # Only store in database after successful posting
+                            self.config.db.store_posted_content(**storage_data)
+                            
                             logger.logger.info(f"Successfully posted {token_to_analyze} analysis - Trigger: {trigger_type}")
                             
                             # Store additional smart money metrics
